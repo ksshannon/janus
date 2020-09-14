@@ -53,6 +53,10 @@ class Janus:
 
             self.c = ConfigReader(config_file)
 
+        # appending to the input netcdf is not supported (yet)
+        if self.c.output_file == self.c.f_init_lc_file:
+            raise RuntimeError('appending to datasets is not supported')
+
         # initialize landscape and domain
         self.lc, self.dist2city, self.domain, self.Ny, self.Nx = self.initialize_landscape_domain()
 
@@ -87,8 +91,22 @@ class Janus:
         """
 
         # import the initial land cover data
-        lc_raster = gdal.Open(self.c.f_init_lc_file)
-        lc = lc_raster.GetRasterBand(1).ReadAsArray()
+        if self.c.f_init_lc_file.endswith(".nc"):
+            gdal.PushErrorHandler('CPLQuietErrorHandler')
+            lc_raster = gdal.Open('NETCDF:' + self.c.f_init_lc_file + ':crop')
+            gdal.PopErrorHandler()
+            band = lc_raster.GetRasterBand(lc_raster.RasterCount)
+            year = int(band.GetMetadataItem('NETCDF_DIM_time'))
+            if self.c.target_year < 0:
+                self.c.target_year = year
+            if self.c.target_year != year:
+                #TODO(kyle): override the specified year?
+                raise RuntimeError('target year ({}) and restart year ({}) mismatch'.format(self.c.target_year, year))
+            lc = lc_raster.GetRasterBand(lc_raster.RasterCount).ReadAsArray()
+
+        else:
+            lc_raster = gdal.Open(self.c.f_init_lc_file)
+            lc = lc_raster.GetRasterBand(1).ReadAsArray()
 
         ny, nx = lc.shape
 
@@ -278,7 +296,6 @@ class Janus:
         out_file = self.c.output_file
         if out_file == "":
             return
-        years = [self.c.target_year + n for n in range(self.c.Nt)]
 
         # TODO(kyle): handle appending/assumed restart
         nc = netcdf.Dataset(out_file, 'w', format='NETCDF4')
@@ -294,7 +311,12 @@ class Janus:
         jmd.history = 'created {}'.format(now)
 
         # Grab metadata from the original landcover file for geo referencing
-        lc = gdal.Open(self.c.f_init_lc_file)
+        if self.c.f_init_lc_file.endswith('.nc'):
+            gdal.PushErrorHandler('CPLQuietErrorHandler')
+            lc = gdal.Open('NETCDF:' + self.c.f_init_lc_file + ':crop')
+            gdal.PopErrorHandler()
+        else:
+            lc = gdal.Open(self.c.f_init_lc_file)
         gt = lc.GetGeoTransform()
         # GetProjectionRef() is safe for GDAL 2.x and 3.x, use GetSpatialRef() +
         # export as needed for GDAL 3.0+.
@@ -317,8 +339,9 @@ class Janus:
         dx = nc.createDimension('x', nx)
         dy = nc.createDimension('y', ny)
 
+        years = [n + self.c.target_year for n in range(self.c.Nt+1)]
         time = nc.createVariable('time', 'u2', ('time',))
-        time.units = 'years'
+        time.units = 'year'
         time.long_name = 'time'
         time[:] = years[:]
 
@@ -387,7 +410,7 @@ if __name__ == '__main__':
     parser.add_argument('-s', '--switch_params', type=list, help='List of lists for switching averse, tolerant, and neutral parameters (alpha, beta)')
     parser.add_argument('-nt', '--nt', type=int, help='Number of time steps')
     parser.add_argument('-attr', '--attr', type=str, help='Boolean that determines if switching parameters are based on attributes')
-    parser.add_argument('-f_init_lc', ' f_init_lc')
+    parser.add_argument('-f_init_lc', '--f_init_lc')
 
     # TODO: number of crops is calculated after doing the GIS pre-processing, if nc is needed for price generation, we might need to adjust this
     parser.add_argument('-nc', '--nc', type=int, help='Number of crops')
